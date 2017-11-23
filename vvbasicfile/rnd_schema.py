@@ -1,4 +1,4 @@
-from schema import Schema, Use, Optional
+from schema import Schema, Use, Optional, Or
 
 
 rnd_schema = Schema({
@@ -11,12 +11,15 @@ rnd_schema = Schema({
     },
     'data': [
         [
-            {
-                'type': str,
+            Or({
+                'type': Or(unicode, str),
                 'args': {
-                    str: object,
+                    Or(unicode, str): object,
                 },
-            }
+                Optional('name'): Or(unicode, str),
+            }, {
+                'hide': Or(unicode, str),
+            })
         ]
     ],
 })

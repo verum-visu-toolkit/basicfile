@@ -1,11 +1,6 @@
 import utils
-import msgpack
-
-# TODO: implement JSON formats (reading + writing)
-# > create a static function: 'load_from_json' that returns a FmsFormat
-# > create methods: 'to_json', 'write_json_to_file'
-# no need for a read_output_file
-# put those methods in the Super class!
+import json
+import gzip
 
 
 class BasicFormat:
@@ -23,20 +18,34 @@ class BasicFormat:
         self._data = self.format_schema.validate(self._data)
 
     # Files
+
+    # > Load files
     @classmethod
-    def load(cls, rf):
-        filedata = msgpack.unpack(rf)
-        return cls(filedata)
+    def load_from_file(cls, filename):
+        """load a gzip-compressed json file"""
+        with gzip.open(filename, 'rb') as rf:
+            jsondata = rf.read()
+            filedata = json.loads(jsondata)
+            return cls(filedata)
 
-    def get_packed(self):
-        self.validate()
-        return msgpack.packb(self._data)
+    @classmethod
+    def load_from_json_file(cls, filename):
+        """load a json file"""
+        with open(filename, 'r') as rf:
+            filedata = json.load(rf)
+            return cls(filedata)
 
+    # > Write files
     def write_to_file(self, filename):
-        packeddata = self.get_packed()
-        wf = open(filename, 'wb')
-        wf.write(packeddata)
-        wf.close()
+        self.validate()
+        jsondata = json.dumps(self._data)
+        with gzip.open(filename, 'wb') as wf:
+            wf.write(jsondata)
+
+    def write_to_json_file(self, filename):
+        self.validate()
+        with open(filename, 'w') as wf:
+            json.dump(self._data, wf)
 
     # Config
     def get_config(self):
