@@ -3,21 +3,28 @@ import json
 import gzip
 
 
-class BasicFormat:
-    def __init__(self, format_schema, create_blank, data=None):
-        self.format_schema = format_schema
+class BasicFormat(utils.SchematicAttributesObject):
+    def __init__(self, data=None, packeddata=None, format_attrs=None):
+        # uses schemas to validate + defaults to initialize the specified attributes for the format
+        utils.SchematicAttributesObject.__init__(self, attrs=format_attrs)
 
-        self._data = create_blank()
-        if type(data) is dict:
-            utils.update(self._data, data)
-            self.validate()
-
-    # Schema
-    def validate(self):
-        """validate and convert data types if necessary"""
-        self._data = self.format_schema.validate(self._data)
+        # hold the data provided, if one dict packed of all the attributes or just a data dict
+        if type(packeddata) is dict:
+            self._packeddata = packeddata.copy()
+            self.validate(attr='_packeddata')
+            self._unpack()
+            self.validate(notattr='_packeddata')
+        elif type(data) is dict:
+            utils.update(self.data, data)
+            self.validate(attr='data')
 
     # Files
+
+    # TODO: combine these pairs of functions into load_from_file and write_to_file with
+    # compressed option
+    # and IF THE FILES GET TOO BIG, *implement optional streaming!* ((1) for json, and sometimes
+    #  (2) first for gzip!); from spt to fms, and fms to rnd
+    # STREAM PIPELINE: (gzip ->) json -> [->fms/->rnd] -> json (-> gzip)
 
     # > Load files
     @classmethod
@@ -25,43 +32,56 @@ class BasicFormat:
         """load a gzip-compressed json file"""
         with gzip.open(filename, 'rb') as rf:
             jsondata = rf.read()
-            filedata = json.loads(jsondata)
-            return cls(filedata)
+            packedfiledata = json.loads(jsondata)
+
+            return cls(packeddata=packedfiledata)
 
     @classmethod
     def load_from_json_file(cls, filename):
         """load a json file"""
         with open(filename, 'r') as rf:
-            filedata = json.load(rf)
-            return cls(filedata)
+            packedfiledata = json.load(rf)
+
+            return cls(packeddata=packedfiledata)
 
     # > Write files
     def write_to_file(self, filename):
-        self.validate()
-        jsondata = json.dumps(self._data)
+        self.validate(notattr='_packeddata')
+        self._pack()
+        self.validate(attr='_packeddata')
+
+        jsondata = json.dumps(self._packeddata)
         with gzip.open(filename, 'wb') as wf:
             wf.write(jsondata)
 
     def write_to_json_file(self, filename):
-        self.validate()
+        self.validate(notattr='_packeddata')
+        self._pack()
+        self.validate(attr='_packeddata')
+
         with open(filename, 'w') as wf:
-            json.dump(self._data, wf)
+            json.dump(self._packeddata, wf)
 
     # Config
     def get_config(self):
-        return self._data['config'].copy()
+        return self.config.copy()
 
     def update_config(self, config_dict, **config_args):
-        config = self._data['config']
-        utils.update(config, config_dict)
-        utils.update(config, config_args)
+        utils.update(self.config, config_dict)
+        utils.update(self.config, config_args)
 
     # Data
 
-    # Not 'get_data', since this returns not only the value of the data but
-    # also the reference to the data in the internal dict object, self._data
-
-    def data(self):
-        return self._data['data']
-
     # Subclasses implement their own data helper methods
+
+    # The pack/unpack methods should be overriden by subclasses to involve other data attributes
+
+    def _pack(self):
+        self._packeddata = {
+            'config': utils.copy(self.config),
+            'data': utils.copy(self.data),
+        }
+
+    def _unpack(self):
+        self.config = utils.copy(self._packeddata['config'])
+        self.data = utils.copy(self._packeddata['data'])
