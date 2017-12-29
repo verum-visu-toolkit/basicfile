@@ -1,96 +1,68 @@
-from basicfile import BasicFormat
-from fms_schema import fms_structures
+from ujson import dumps as to_minjson
+from utils import load_basicfile_field, map_list_to_keys, map_dict_to_indices
+from basicfile import BasicFormatReader, BasicFrameMaker, BasicFormatWriter
 
 
-# unpacked: self.config, self.data, self.props; self.data has full dicts for each frame property
-# packed: self._packeddata; self._packeddata has lists for each frame property associating with
-# the embedded 'props' list (has embedded: 'config', 'data', 'props')
+class FmsFormatReader(BasicFormatReader):
+    data_location = 'data.channel0'
+    # to support mult channels, have data_location change after __next__ reaches the end of frames
 
-class FmsFormat(BasicFormat):
-    def __init__(self, data=None, packeddata=None):
-        # Although these are declared in BasicFormat, included here for type detection... dumb
-        self.data = {}
-        self.config = {}
+    def __init__(self, fms_readpath):
+        BasicFormatReader.__init__(self, fms_readpath)
+        self.props = None
 
-        self.props = []
-        BasicFormat.__init__(self, data=data, packeddata=packeddata, format_attrs=fms_structures)
+    def onenter(self):
+        self.props = [str(propname) for propname in load_basicfile_field(self.readpath, 'props')]
 
-    # Data helper methods
+    def unpack_frame(self, packed_frame):
+        return map_list_to_keys(packed_frame, self.props)
 
-    # Returns the reference to the channel in the data
-    def channel(self, channel_num):
-        return self.data['channel{:d}'.format(channel_num)]
 
-    # Returns the reference to the frame in the data
-    def frame(self, frame_num, channel_num=0):
-        if frame_num < 0:
-            frame_num = 0
+class FmsFrameMaker(BasicFrameMaker):
+    def __init__(self, spts, make_frame=None, fms_config=None):
 
-        channel = self.channel(channel_num)
-        frame = channel[frame_num]
-        return frame
+        def make_frame__wrapper(sample_num, data):
+            spectra_for_sample = self.get_spectra_for_sample_pos(data, sample_num)
+            return make_frame(spectra_for_sample)
 
-    def expand_frames_to_len(self, num_frames, blank_frame=None, channel_num=0):
-        if blank_frame is None:
-            blank_frame = dict()
+        BasicFrameMaker.__init__(self, spts, make_frame=make_frame__wrapper, config=fms_config)
 
-        channel = self.channel(channel_num)
-        num_frames_to_add = num_frames - len(channel)
-        if num_frames_to_add > 0:
-            channel += [blank_frame.copy() for _ in range(num_frames_to_add)]
-
-    def add_prop_to_frame(self, frame_num, channel_num=0, propname=None, val=None):
-        if propname is None or val is None:
-            raise ValueError('propname and val cannot be None')
-
-        if type(propname) is str:
-            propkey = propname
-        elif type(propname) is list:
-            propkey = '_'.join(propname)
-        else:
-            raise TypeError('propname must be a string or list')
-
-        frame = self.frame(frame_num, channel_num=channel_num)
-        frame[propkey] = val
-
-        if propkey not in self.props:
-            self.props.append(propkey)
-
-    # Packing/Unpacking
-
-    # Overrides BasicFormat._pack
-    def _pack(self):
-        self._packeddata = {
-            'config': self.config.copy(),
-            'data': {},
-            'props': self.props[:],
+    @staticmethod
+    def get_spectra_for_sample_pos(spts, sample_num):
+        spectra_for_frame = {
+            filename: spt['data']['channel0'][sample_num]
+            for filename, spt in spts.items()
+            if spt['config']['num_spectra'] > sample_num
         }
+        return spectra_for_frame
 
-        for channel_key, channel in self.data.items():
-            packedchannel = [self._listifyframeprops(propsdict) for propsdict in channel]
-            self._packeddata['data'][channel_key] = packedchannel
 
-    def _listifyframeprops(self, propsdict):
-        propslist = [None] * len(self.props)
-        for propkey, val in propsdict.items():
-            propindex = self.props.index(propkey)
-            propslist[propindex] = val
-        return propslist
+class FmsFormatWriter(BasicFormatWriter):
+    def __init__(self, frame_maker, config=None, props=None):
+        header_data = {
+            'config': config,
+            'props': props,
+        }
+        BasicFormatWriter.__init__(self, frame_maker, header_data=header_data)
 
-    # Overrides BasicFormat._unpack
-    # called in BasicFormat.__init__ when it receives packeddata option
-    def _unpack(self):
-        self.config = self._packeddata['config'].copy()
-        self.data = {}
-        self.props = self._packeddata['props'][:]
+    @staticmethod
+    def create_stream_wrapper_parts(header_data):
+        """
+        Each subclass of BasicFormatWriter must include this function
+        """
+        config_dict = {
+            'config': header_data['config'],
+            'props': header_data['props'],
+        }
+        beginning = to_minjson(config_dict)[:-1] + ',"data":{'
+        ending = '}}'
+        return beginning, ending
 
-        for channel_key, channel in self._packeddata['data'].items():
-            unpackedchannel = [self._dictifyframeprops(propslist) for propslist in channel]
-            self.data[channel_key] = unpackedchannel
+    def before_write_frames(self):
+        self.wf.write('"channel0":[')
 
-    def _dictifyframeprops(self, propslist):
-        propsdict = dict()
-        for propindex, val in enumerate(propslist):
-            propkey = self.props[propindex]
-            propsdict[propkey] = val
-        return propsdict
+    def pack_frame(self, frame):
+        return map_dict_to_indices(frame, self.header_data['props'])
+
+    def after_write_frames(self):
+        self.wf.write(']')

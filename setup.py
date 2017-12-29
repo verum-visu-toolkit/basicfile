@@ -10,7 +10,8 @@ setup(
     author_email='jczimm@jczimm.com',
     description='',
     install_requires=[
-        'msgpack-python==0.4.8',
-        'schema==0.6.6',
+        # 'schema==0.6.6', # only necessary for vvbasicfile.static.*; these are not required
+        'ijson==2.3',
+        'ujson==1.35'
     ]
 )

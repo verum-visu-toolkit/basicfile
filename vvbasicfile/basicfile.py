@@ -1,87 +1,130 @@
-import utils
-import json
-import gzip
+from vvbasicfile import ijson
+from ujson import dumps as to_minjson
 
 
-class BasicFormat(utils.SchematicAttributesObject):
-    def __init__(self, data=None, packeddata=None, format_attrs=None):
-        # uses schemas to validate + defaults to initialize the specified attributes for the format
-        utils.SchematicAttributesObject.__init__(self, attrs=format_attrs)
+class BasicFormatReader:
+    def __init__(self, readpath):
+        self.readpath = readpath
+        self.rf = None
+        self.packed_frames_gen = None
 
-        # hold the data provided, if one dict packed of all the attributes or just a data dict
-        if type(packeddata) is dict:
-            self._packeddata = packeddata.copy()
-            self.validate(attr='_packeddata')
-            self._unpack()
-            self.validate(notattr='_packeddata')
-        elif type(data) is dict:
-            utils.update(self.data, data)
-            self.validate(attr='data')
+        # for compatibility with python3
+        self.__next__ = self.next
 
-    # Files
+    # should be overwritten by child classes for channel support
+    data_location = 'data'
 
-    # TODO: combine these pairs of functions into load_from_file and write_to_file with
-    # compressed option
-    # and IF THE FILES GET TOO BIG, *implement optional streaming!* ((1) for json, and sometimes
-    #  (2) first for gzip!); from spt to fms, and fms to rnd
-    # STREAM PIPELINE: (gzip ->) json -> [->fms/->rnd] -> json (-> gzip)
+    def __enter__(self):
+        self.onenter()  # overwritten in subclasses
 
-    # > Load files
-    @classmethod
-    def load_from_file(cls, filename):
-        """load a gzip-compressed json file"""
-        with gzip.open(filename, 'rb') as rf:
-            jsondata = rf.read()
-            packedfiledata = json.loads(jsondata)
+        self.rf = open(self.readpath, 'r')
 
-            return cls(packeddata=packedfiledata)
+        self.packed_frames_gen = ijson.items(self.rf, self.data_location + '.item')
+        return self
 
-    @classmethod
-    def load_from_json_file(cls, filename):
-        """load a json file"""
-        with open(filename, 'r') as rf:
-            packedfiledata = json.load(rf)
+    # overwritten in children
+    def onenter(self): pass
 
-            return cls(packeddata=packedfiledata)
+    def __iter__(self):
+        """
+        for frame in reader:
+            ...
+        """
+        return self
 
-    # > Write files
-    def write_to_file(self, filename):
-        self.validate(notattr='_packeddata')
-        self._pack()
-        self.validate(attr='_packeddata')
+    def next(self):
+        try:
+            packed_frame = next(self.packed_frames_gen)
+            unpacked_frame = self.unpack_frame(packed_frame)
+            return unpacked_frame
+        except StopIteration:
+            raise StopIteration('no more frames to read from basicfile')
 
-        jsondata = json.dumps(self._packeddata)
-        with gzip.open(filename, 'wb') as wf:
-            wf.write(jsondata)
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.rf.close()
 
-    def write_to_json_file(self, filename):
-        self.validate(notattr='_packeddata')
-        self._pack()
-        self.validate(attr='_packeddata')
+    # overwritten in children
+    def unpack_frame(self, packed_frame): return packed_frame
 
-        with open(filename, 'w') as wf:
-            json.dump(self._packeddata, wf)
 
-    # Config
-    def get_config(self):
-        return self.config.copy()
+class BasicFrameMaker:
+    """
+    Generator for BasicFormat frames
+    """
+    def __init__(self, data, make_frame=None, config=None):
+        self.data = data
+        self.make_frame = make_frame
+        self.num_frames = config['num_frames']
+        # for compatibility with python3
+        self.__next__ = self.next
 
-    def update_config(self, config_dict, **config_args):
-        utils.update(self.config, config_dict)
-        utils.update(self.config, config_args)
+        self.frame_gen = self._gen()
 
-    # Data
+    def _gen(self):
+        for sample_num in range(self.num_frames):
+            yield self.make_frame(sample_num, self.data)
 
-    # Subclasses implement their own data helper methods
+    def __iter__(self):
+        return self
 
-    # The pack/unpack methods should be overriden by subclasses to involve other data attributes
+    def next(self):
+        return next(self.frame_gen)
 
-    def _pack(self):
-        self._packeddata = {
-            'config': utils.copy(self.config),
-            'data': utils.copy(self.data),
-        }
 
-    def _unpack(self):
-        self.config = utils.copy(self._packeddata['config'])
-        self.data = utils.copy(self._packeddata['data'])
+class BasicFormatWriter:
+    def __init__(self, frame_maker, header_data=None):
+        self.frame_maker = frame_maker
+        self.header_data = header_data
+        self.wf = None
+
+    def write(self, destfilepath, tqdm=None):
+        wf = self.wf = open(destfilepath, 'w')
+        beginning, ending = self.create_stream_wrapper_parts(self.header_data)
+
+        wf.write(beginning)
+
+        # > multiple channels control code might have smth here (like a for loop)
+        # add flag for num_channels
+
+        self.before_write_frames()
+
+        enum_frame_gen = enumerate(self.frame_maker)
+        if tqdm is not None:
+            enum_frame_gen = tqdm(enum_frame_gen, unit='frames')
+
+        for frame_num, frame in enum_frame_gen:
+            packed_frame = self.pack_frame(frame)
+
+            try:
+                current_frame_jsonstr = ',' + to_minjson(packed_frame)
+            except:
+                wf.write(',{"err":22}')  # 22: EINVAL, invalid argument
+                continue
+
+            if frame_num is 0:
+                current_frame_jsonstr = current_frame_jsonstr[1:]
+
+            try:
+                wf.write(current_frame_jsonstr)
+            except:
+                wf.write(',{"err":5}')  # 5: EIO, I/O error
+
+        self.after_write_frames()
+
+        # > multiple channels control code might have smth here (like end of a for loop)
+
+        wf.write(ending)
+
+        wf.close()
+
+    # The following functions should be defined by a child class
+
+    @staticmethod
+    def create_stream_wrapper_parts(header_data):
+        raise Exception('create_stream_wrapper_parts must be defined by a child class')
+
+    def before_write_frames(self): pass
+
+    def pack_frame(self, unpacked_frame): return unpacked_frame
+
+    def after_write_frames(self): pass
